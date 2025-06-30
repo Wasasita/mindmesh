@@ -34,30 +34,8 @@ export const groupByThreshold = async (texts: string[], images: string[]): Promi
   }
 };
 
-// Additional API endpoints you might need
-export const groupBySemantics = async (texts: string[], images: string[]) => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/group-semantics`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        texts: texts,
-        images: images
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error calling group-semantics API:', error);
-    throw error;
-  }
-};
+// Note: groupBySemantics was removed as it's not needed - 
+// semantic grouping uses groupByThreshold instead
 
 export const classifyArtStyle = async (images: string[]) => {
   try {
@@ -67,6 +45,7 @@ export const classifyArtStyle = async (images: string[]) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        texts: [], // Add empty texts array to match ClassifyRequest format
         images: images
       })
     });

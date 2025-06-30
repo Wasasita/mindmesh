@@ -1,14 +1,41 @@
-import React, { useEffect, useState, lazy, Suspense } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useTheme } from "../contexts/ThemeContext";
 import type { Node } from "../components/CanvasComponents";
 import { CanvasImage, CanvasText } from "../components/CanvasComponents";
+import { ClientOnly } from "../components/ClientOnly";
 import { groupByThreshold, classifyArtStyle, classifyMoodTheme } from "../services/api";
 
-const Stage = lazy(() => import("react-konva").then(mod => ({ default: mod.Stage })));
-const Layer = lazy(() => import("react-konva").then(mod => ({ default: mod.Layer })));
-const Rect = lazy(() => import("react-konva").then(mod => ({ default: mod.Rect })));
-const Text = lazy(() => import("react-konva").then(mod => ({ default: mod.Text })));
+// Konva components - will be loaded dynamically
+let Stage: any = null;
+let Layer: any = null;
+let Rect: any = null;
+let Text: any = null;
+
+// Load Konva components on the client
+const loadKonvaComponents = async () => {
+  if (typeof window !== 'undefined') {
+    try {
+      console.log('🔄 Main canvas: Starting Konva import...');
+      const konva = await import('react-konva');
+      Stage = konva.Stage;
+      Layer = konva.Layer;
+      Rect = konva.Rect;
+      Text = konva.Text;
+      console.log('✅ Main Konva components loaded:', {
+        Stage: !!Stage,
+        Layer: !!Layer,
+        Rect: !!Rect,
+        Text: !!Text
+      });
+      return true;
+    } catch (error) {
+      console.error('❌ Failed to load main Konva components:', error);
+      return false;
+    }
+  }
+  return false;
+};
 
 // Enhanced Node interface for AI grouping
 interface GroupedNode extends Node {
@@ -46,23 +73,47 @@ export default function CanvasPage() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [groupCount, setGroupCount] = useState(3);
   const [canvasName, setCanvasName] = useState("Untitled");
-
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState("");
-  const [isClient, setIsClient] = useState(false);
+  const [konvaReady, setKonvaReady] = useState(false);
 
   const [imageSliderOffset, setImageSliderOffset] = useState(0);
   const [textSliderOffset, setTextSliderOffset] = useState(0);
   const [isEditingName, setIsEditingName] = useState(false);
   const [tempCanvasName, setTempCanvasName] = useState("");  const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);  const [selectedNodeHeight, setSelectedNodeHeight] = useState(200);
-  const [isResizingSelectedNode, setIsResizingSelectedNode] = useState(false);
-  const [draggedNode, setDraggedNode] = useState<Node | null>(null);
+  const [isResizingSelectedNode, setIsResizingSelectedNode] = useState(false);  const [draggedNode, setDraggedNode] = useState<Node | null>(null);
   const [isDragOverCanvas, setIsDragOverCanvas] = useState(false);
   
+  // Layer ref for forcing redraws
+  const layerRef = useRef<any>(null);
+  // Initialize Konva components
   useEffect(() => {
-    setIsClient(true);
-  }, []);  // Dynamic canvas size calculation
+    console.log('🔄 Main canvas: Initializing Konva...');
+    loadKonvaComponents().then((success) => {
+      console.log('🔄 Main canvas: Konva load result:', success);
+      setKonvaReady(success);
+    }).catch((error) => {
+      console.error('❌ Main canvas: Error loading Konva:', error);
+      setKonvaReady(false);
+    });
+  }, []);
+
+  // Force redraw when nodes change (especially canvas nodes)
+  useEffect(() => {
+    const canvasNodes = nodes.filter(node => node.x >= 0 && node.y >= 0);
+    console.log('📊 Nodes changed - Canvas nodes count:', canvasNodes.length);
+    
+    if (canvasNodes.length > 0 && layerRef.current) {
+      console.log('🔄 Forcing redraw due to node changes');
+      setTimeout(() => {
+        if (layerRef.current) {
+          layerRef.current.batchDraw();
+          layerRef.current.draw();
+        }
+      }, 100);
+    }
+  }, [nodes]);// Dynamic canvas size calculation
   useEffect(() => {
     const updateCanvasSize = () => {
       if (typeof window !== 'undefined') {
@@ -211,44 +262,66 @@ export default function CanvasPage() {
 
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);    };
-  }, [isResizingSelectedNode]);
+      document.removeEventListener('mouseup', handleMouseUp);    };  }, [isResizingSelectedNode]);
 
   // Drag and drop handlers
   const handleDragStart = (node: Node) => {
+    console.log('🔥 Drag started for node:', node.id, node.type);
     setDraggedNode(node);
   };
 
   const handleDragEnd = () => {
+    console.log('🔥 Drag ended');
     setDraggedNode(null);
-  };  const handleCanvasDrop = (e: React.DragEvent) => {
+  };
+
+  const handleCanvasDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOverCanvas(false);
     
     if (draggedNode) {
-      const canvasRect = (e.target as HTMLElement).closest('.canvas-container')?.getBoundingClientRect();
-      if (canvasRect) {
-        const x = e.clientX - canvasRect.left;
-        const y = e.clientY - canvasRect.top;
+      // Get the canvas container's position
+      const canvasContainer = e.currentTarget;
+      const rect = canvasContainer.getBoundingClientRect();
+      
+      // Calculate actual drop position relative to canvas
+      const dropX = e.clientX - rect.left;
+      const dropY = e.clientY - rect.top;
+      
+      console.log('🎯 Dropping node at MOUSE POSITION:', { x: dropX, y: dropY });
+      console.log('📦 Dragged node:', draggedNode);
+      
+      // Update node position
+      setNodes(prev => {
+        const updated = prev.map(node => 
+          node.id === draggedNode.id 
+            ? { ...node, x: dropX, y: dropY }  // ✅ Use actual mouse position
+            : node
+        );
         
-        console.log('Dropping node at:', { x, y });
-        console.log('Dragged node:', draggedNode);
+        console.log('✅ Updated nodes after drop:', updated.map(n => ({ 
+          id: n.id.substring(0, 8), 
+          type: n.type, 
+          x: n.x, 
+          y: n.y,
+          visible: n.x >= 0 && n.y >= 0 
+        })));
         
-        // Move the dragged node from off-canvas to the drop position
-        setNodes(prev => {
-          const updated = prev.map(node => 
-            node.id === draggedNode.id 
-              ? { ...node, x, y }
-              : node
-          );
-          console.log('Updated nodes after drop:', updated);
-          return updated;
-        });
+        // Force redraw after state update with proper timing
+        setTimeout(() => {
+          console.log('🔄 State should be updated now, forcing redraw');
+          if (layerRef.current) {
+            layerRef.current.batchDraw();
+            layerRef.current.draw();
+          }
+        }, 50);
         
-        // Automatically select the newly placed node
-        setSelectedNode(draggedNode.id);
-        setDraggedNode(null);
-      }
+        return updated;
+      });
+      
+      // Select the dropped node
+      setSelectedNode(draggedNode.id);
+      setDraggedNode(null);
     }
   };
 
@@ -267,28 +340,63 @@ export default function CanvasPage() {
     if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
       setIsDragOverCanvas(false);
     }
-  };  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  };  
+  
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && file.type.startsWith("image/")) {
       const imageUrl = URL.createObjectURL(file);
-      console.log('Created image URL:', imageUrl);
+      console.log('📁 Created image URL:', imageUrl);
       
-      const newNode: Node = {
-        id: crypto.randomUUID(),
-        type: "image",
-        x: -1000, // Place off-canvas initially (invisible)
-        y: -1000,
-        content: imageUrl,
-        width: 120,
-        height: 120,
+      // Create an Image object to get the natural dimensions
+      const img = new Image();
+      img.onload = () => {
+        console.log('📁 Image loaded with natural dimensions:', img.naturalWidth, 'x', img.naturalHeight);
+        
+        // Calculate width proportionally to maintain aspect ratio with height = 150
+        const aspectRatio = img.naturalWidth / img.naturalHeight;
+        const scaledWidth = 150 * aspectRatio;
+        
+        console.log('📁 Scaled dimensions - Width:', scaledWidth, 'Height: 150');
+        
+        const newNode: Node = {
+          id: crypto.randomUUID(),
+          type: "image",
+          x: -1000, // Place off-canvas initially (invisible)
+          y: -1000,
+          content: imageUrl,
+          width: scaledWidth,  
+          height: 150, 
+        };
+        
+        console.log('📁 Created new image node with scaled dimensions:', newNode);
+        setNodes((prev) => {
+          const updated = [...prev, newNode];
+          console.log('📁 Updated total nodes:', updated.length);
+          console.log('📁 Sidebar nodes:', updated.filter(n => n.x < 0).length);
+          console.log('📁 Canvas nodes:', updated.filter(n => n.x >= 0).length);
+          return updated;
+        });
       };
       
-      console.log('Created new image node:', newNode);
-      setNodes((prev) => {
-        const updated = [...prev, newNode];
-        console.log('Updated nodes:', updated);
-        return updated;
-      });
+      img.onerror = () => {
+        console.error('📁 Failed to load image for dimension detection');
+        // Fallback to square size if image fails to load
+        const newNode: Node = {
+          id: crypto.randomUUID(),
+          type: "image",
+          x: -1000,
+          y: -1000,
+          content: imageUrl,
+          width: 100,  
+          height: 100, 
+        };
+        
+        setNodes((prev) => [...prev, newNode]);
+      };
+      
+      // Start loading the image
+      img.src = imageUrl;
       
       // Clear the input
       event.target.value = '';
@@ -331,7 +439,26 @@ export default function CanvasPage() {
         if (textSliderOffset > 0 && textSliderOffset >= remainingTexts - 2) {
           setTextSliderOffset(Math.max(0, remainingTexts - 3));
         }
-      }    }
+      }    }  };
+
+  // DEBUG: Add a test function to place a node directly on canvas
+  const addTestNode = () => {
+    console.log('🧪 Adding test node directly to canvas');
+    const testNode: Node = {
+      id: crypto.randomUUID(),
+      type: "text",
+      x: 50,
+      y: 50,
+      content: "TEST NODE - Should be visible!",
+      width: 200,
+      height: 80,
+    };
+    
+    setNodes(prev => {
+      const updated = [...prev, testNode];
+      console.log('🧪 Test node added, updated nodes:', updated);
+      return updated;
+    });
   };
 
   // Canvas name editing functions
@@ -392,9 +519,18 @@ export default function CanvasPage() {
   };
   // Get filtered nodes by type - only show items not yet placed on canvas
   const getImageNodes = () => nodes.filter(node => node.type === 'image' && node.x < 0 && node.y < 0);
-  const getTextNodes = () => nodes.filter(node => node.type === 'text' && node.x < 0 && node.y < 0);
-  // Get all canvas-visible nodes (placed nodes)
-  const getCanvasNodes = () => nodes.filter(node => node.x >= 0 && node.y >= 0);
+  const getTextNodes = () => nodes.filter(node => node.type === 'text' && node.x < 0 && node.y < 0);  // Get all canvas-visible nodes (placed nodes)
+  const getCanvasNodes = () => {
+    const canvasNodes = nodes.filter(node => node.x >= 0 && node.y >= 0);
+    console.log('Canvas nodes:', canvasNodes.map(n => ({ 
+      id: n.id.substring(0, 8), 
+      type: n.type, 
+      x: n.x, 
+      y: n.y, 
+      content: n.content.substring(0, 30) 
+    })));
+    return canvasNodes;
+  };
 
   // Node selection and movement handlers
   const handleNodeSelect = (node: Node) => {
@@ -595,11 +731,24 @@ export default function CanvasPage() {
 
       console.log('Sending to Python API:', { texts, images });
 
+      // Check if we have the required data for the selected grouping type
+      if (groupingType === 'semantic' && texts.length === 0) {
+        alert('Semantic grouping requires at least one text note on the canvas.');
+        setIsGroupingMode(false);
+        return;
+      }
+      
+      if (groupingType === 'art-style' && images.length === 0) {
+        alert('Art style grouping requires at least one image on the canvas.');
+        setIsGroupingMode(false);
+        return;
+      }
+
       let enhancedNodes: GroupedNode[] = [...canvasNodes];
       let newGroups: NodeGroup[] = [];
 
       // Call appropriate API based on grouping type
-      if (groupingType === 'semantic') {
+      if (groupingType === 'semantic' && texts.length > 0) {
         // Use the threshold-based grouping for semantic similarity
         const apiResults = await groupByThreshold(texts, images);
         console.log('API Results:', apiResults);
@@ -642,13 +791,13 @@ export default function CanvasPage() {
       } else if (groupingType === 'art-style' && images.length > 0) {
         // Use art style classification API
         const styleResults = await classifyArtStyle(images);
-        console.log('Art Style Results:', styleResults);
+        console.log('Art Style Results (raw):', styleResults);
+        console.log('Art Style Results type:', typeof styleResults, Array.isArray(styleResults));
         
-        // Process art style results (implement based on your API response format)
-        // This will depend on what your Python API returns for art style classification
+        // Process art style results
         newGroups = processArtStyleResults(styleResults, canvasNodes);
-      } else if (groupingType === 'mood-theme') {
-        // Use mood/theme classification API
+      } else if (groupingType === 'mood-theme' && (texts.length > 0 || images.length > 0)) {
+        // Use mood/theme classification API - needs at least one text or image
         const moodResults = await classifyMoodTheme(texts, images);
         console.log('Mood Theme Results:', moodResults);
         
@@ -685,6 +834,13 @@ export default function CanvasPage() {
 
     } catch (error) {
       console.error('AI Grouping failed:', error);
+      console.error('Error details:', {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        groupingType,
+        canvasNodesCount: canvasNodes.length,
+        textsCount: canvasNodes.filter(n => n.type === 'text').length,
+        imagesCount: canvasNodes.filter(n => n.type === 'image').length
+      });
       alert('AI Grouping failed. Make sure your Python API server is running on localhost:8000. Falling back to mock data.');
       
       // Fallback to mock grouping
@@ -711,22 +867,42 @@ export default function CanvasPage() {
 
   // Helper functions to process API results
   const processArtStyleResults = (results: any, canvasNodes: GroupedNode[]): NodeGroup[] => {
-    // Implement based on your Python API's art style response format
-    // This is a placeholder - adjust based on your actual API response
+    console.log('Processing art style results:', results);
+    
+    // Handle different response formats
+    if (!results || (Array.isArray(results) && results.length === 0)) {
+      console.warn('No art style results to process');
+      return [];
+    }
+    
+    // Ensure results is an array
+    const resultsArray = Array.isArray(results) ? results : [results];
+    console.log('Results array:', resultsArray);
+    
     const styleGroups: { [key: string]: string[] } = {};
     
-    results.forEach((result: any, index: number) => {
-      const style = result.style || 'unknown';
+    resultsArray.forEach((result: any, index: number) => {
+      console.log(`Processing result ${index}:`, result);
+      
+      const style = result.style || result.art_style || 'unknown';
+      const imageUrl = result.image || result.image_url;
+      
       if (!styleGroups[style]) {
         styleGroups[style] = [];
       }
       
-      // Find the corresponding node
-      const node = canvasNodes.find(n => n.type === 'image');
+      // Find the corresponding image node
+      const node = canvasNodes.find(n => n.type === 'image' && n.content === imageUrl);
       if (node) {
         styleGroups[style].push(node.id);
+        console.log(`Matched image node ${node.id} to style ${style}`);
+      } else {
+        console.warn(`Could not find matching node for image: ${imageUrl}`);
+        console.log('Available image nodes:', canvasNodes.filter(n => n.type === 'image').map(n => ({ id: n.id, content: n.content })));
       }
     });
+
+    console.log('Style groups:', styleGroups);
 
     return Object.entries(styleGroups).map(([style, nodeIds], index) => ({
       id: `group-art-style-${index}`,
@@ -739,18 +915,22 @@ export default function CanvasPage() {
   };
 
   const processMoodThemeResults = (results: any, canvasNodes: GroupedNode[]): NodeGroup[] => {
-    // Implement based on your Python API's mood/theme response format
-    // This is a placeholder - adjust based on your actual API response
+    // Process mood/theme classification results
     const moodGroups: { [key: string]: string[] } = {};
     
     results.forEach((result: any) => {
-      const mood = result.mood || 'neutral';
+      const mood = result.mood || result.theme || 'neutral';
+      const content = result.text || result.image;
+      
       if (!moodGroups[mood]) {
         moodGroups[mood] = [];
       }
       
-      // Map results back to node IDs
-      // This will depend on your API response format
+      // Find the corresponding node
+      const node = canvasNodes.find(n => n.content === content);
+      if (node) {
+        moodGroups[mood].push(node.id);
+      }
     });
 
     return Object.entries(moodGroups).map(([mood, nodeIds], index) => ({
@@ -878,15 +1058,15 @@ export default function CanvasPage() {
               
               <div className="flex gap-2 flex-1">
                 {getImageNodes()
-                  .slice(imageSliderOffset, imageSliderOffset + 3)
+                  .slice(imageSliderOffset, imageSliderOffset + 4) // 🎚️ Show 4 at a time
                   .map((node, index) => {
-                    const actualIndex = imageSliderOffset + index;
+                    const actualIndex = imageSliderOffset + index;  // 🔢 Real index
                     const isSelected = selectedNode === node.id;
                     return (                      <button 
                         key={node.id}
                         onClick={() => selectNodeByIndex('image', actualIndex)}
                         draggable
-                        onDragStart={() => handleDragStart(node)}
+                        onDragStart={() => handleDragStart(node)} // 🖱️ Start drag
                         onDragEnd={handleDragEnd}
                         className="text-white rounded p-2 text-sm transition-colors cursor-pointer select-none"
                         style={{ 
@@ -905,7 +1085,7 @@ export default function CanvasPage() {
                         }}
                         title={`Drag to canvas or click to select • Image #${actualIndex + 1}`}
                       >
-                        🖼️ {actualIndex + 1}
+                        🖼️ {actualIndex + 1}              {/* 🔢 Show number */}
                       </button>
                     );
                   })}
@@ -1113,10 +1293,7 @@ export default function CanvasPage() {
                           <p className="text-xs" style={{ color: theme.text.secondary }}>
                             {node.type === 'image' ? '🖼️ Image' : '📝 Text'} #{nodeIndex + 1}
                           </p>
-                          <span 
-                            className="text-xs px-2 py-1 rounded"
-                            style={{ backgroundColor: theme.accent.secondary, color: theme.text.primary }}
-                          >
+                          <span className="text-xs px-2 py-1 rounded" style={{ backgroundColor: theme.accent.secondary, color: theme.text.primary }}>
                             {node.type}
                           </span>
                         </div>
@@ -1136,14 +1313,8 @@ export default function CanvasPage() {
                           <div className="h-full flex flex-col">
                             <p className="italic mb-2 text-sm" style={{ color: theme.text.secondary }}>Image Preview</p>
                             <div className="flex-1 rounded border overflow-hidden" style={{ borderColor: theme.border }}>
-                              <img 
-                                src={node.content} 
-                                alt="Selected" 
-                                className="w-full h-full object-contain"
-                                style={{ backgroundColor: theme.bg.primary }}
-                                onError={(e) => {
-                                  (e.target as HTMLImageElement).style.display = 'none';
-                                }}
+                              <img src={node.content} alt="Selected" className="w-full h-full object-contain" style={{ backgroundColor: theme.bg.primary }}
+                                onError={(e) => {(e.target as HTMLImageElement).style.display = 'none';}}
                               />
                             </div>
                           </div>
@@ -1197,7 +1368,7 @@ export default function CanvasPage() {
                 }}
               />
               <p className="text-xs mt-2 text-center" style={{ color: theme.text.muted }}>
-                MindMesh Assistant
+                MindMesh Mascot
               </p>
             </div>
           </div>
@@ -1274,11 +1445,18 @@ export default function CanvasPage() {
                   ))}
                 </select>
               </div>
-              
-              {/* Debug Info */}
+                {/* Debug Info */}
               <div className="text-xs" style={{ color: theme.text.muted }}>
                 Canvas: {getCanvasNodes().length} | Sidebar: {nodes.filter(n => n.x < 0).length}
               </div>
+              
+              {/* Test Button */}
+              <button 
+                onClick={addTestNode}
+                className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+              >
+                🧪 Add Test Node
+              </button>
             </div>
           </div>          {/* Canvas Stage */}
           <div 
@@ -1286,16 +1464,31 @@ export default function CanvasPage() {
               isDragOverCanvas ? 'ring-4 ring-blue-400 ring-opacity-50' : ''
             }`}
             onDrop={handleCanvasDrop}
-            onDragOver={handleCanvasDragOver}
-            onDragLeave={handleCanvasDragLeave}
-          >
-            {isClient ? (
-              <Suspense fallback={<div className="text-white p-8">Loading canvas...</div>}>
-                <Stage 
-                  width={canvasSize.width} 
-                  height={canvasSize.height} 
-                  style={{ backgroundColor: theme.bg.canvas }}
-                >                  <Layer>
+            onDragOver={handleCanvasDragOver}            onDragLeave={handleCanvasDragLeave}
+          >            <ClientOnly fallback={<div className="text-white p-8">Initializing canvas...</div>}>
+              {(() => {
+                console.log('🔍 Canvas render check:', {
+                  konvaReady,
+                  hasStage: !!Stage,
+                  hasLayer: !!Layer,
+                  canRender: konvaReady && Stage && Layer
+                });
+                
+                if (!konvaReady) {
+                  return <div className="text-white p-8">Loading Konva components...</div>;
+                }
+                
+                if (!Stage || !Layer) {
+                  return <div className="text-white p-8">Konva components not available...</div>;
+                }
+                
+                return (
+                  <Stage 
+                    width={canvasSize.width} 
+                    height={canvasSize.height} 
+                    style={{ backgroundColor: theme.bg.canvas }}
+                  >
+                    <Layer ref={layerRef}>
                     {/* Group Backgrounds */}
                     {groups.map((group) => (
                       <React.Fragment key={`group-bg-${group.id}`}>
@@ -1321,9 +1514,24 @@ export default function CanvasPage() {
                         />
                       </React.Fragment>
                     ))}
-                    
                     {/* Canvas Nodes */}
-                    {getCanvasNodes().map((node) => {
+                    {(() => {
+                    const canvasNodes = getCanvasNodes();
+                    console.log('🎨 Rendering canvas nodes:', canvasNodes.length, canvasNodes.map(n => ({
+                      id: n.id.substring(0, 8),
+                      type: n.type,
+                      x: n.x,
+                      y: n.y,
+                      content: n.content.substring(0, 30)
+                    })));
+                    
+                    if (canvasNodes.length === 0) {
+                      console.log('❌ No canvas nodes to render - all items are off-canvas');
+                    }
+                    
+                    return canvasNodes.map((node, index) => {
+                      console.log('🔄 Processing node for render:', node.id, node.type, `(${node.x}, ${node.y})`);
+                      
                       if (node.type === "text") {
                         return (
                           <CanvasText
@@ -1333,11 +1541,20 @@ export default function CanvasPage() {
                             onSelect={handleNodeSelect}
                             onDragEnd={handleNodeDragEnd}
                             theme={theme}
+                            layerRef={layerRef}
                           />
                         );
                       }
                       
                       if (node.type === "image") {
+                        console.log('🖼️ Rendering IMAGE node:', {
+                          id: node.id.substring(0, 8),
+                          position: `(${node.x}, ${node.y})`,
+                          size: `${node.width}x${node.height}`,
+                          contentType: typeof node.content,
+                          contentPreview: node.content.substring(0, 50)
+                        });
+                        
                         return (
                           <CanvasImage
                             key={node.id}
@@ -1346,18 +1563,20 @@ export default function CanvasPage() {
                             onSelect={handleNodeSelect}
                             onDragEnd={handleNodeDragEnd}
                             theme={theme}
+                            layerRef={layerRef}
                           />
                         );
                       }
                       
+                      console.warn('⚠️ Unknown node type:', node.type, 'for node:', node.id);
                       return null;
-                    })}
-                  </Layer>
-              </Stage>
-            </Suspense>
-            ) : (
-              <div className="text-white p-8">Initializing canvas...</div>
-            )}
+                    });
+                  })()}
+                    </Layer>
+                  </Stage>
+                );
+              })()}
+            </ClientOnly>
           </div>
         </section>
       </main>
